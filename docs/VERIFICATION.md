@@ -1,8 +1,20 @@
-# v1.0.0 验证记录
+# v1.0.1 验证记录
 
 记录日期：2026-10-30。以下把构建、合成测试和真实 Finder 操作分开记录。
 
-## 已完成
+## v1.0.1 命名更新
+
+应用名称统一为“桌面文件隐身”，没有业务逻辑变化。Bundle ID `io.github.jayzengcodetrip.desktop-privacy` 和本地数据目录保持不变。
+
+| 本轮检查 | 实际结果 |
+| --- | --- |
+| v1.0.1 两架构构建与应用命名 | 通过：同包 `arm64` + `x86_64`；App 与窗口名均为“桌面文件隐身” |
+| 最终应用与 ZIP 内容、版本及签名检查 | 通过：ZIP 内为“桌面文件隐身.app”，版本 1.0.1 / build 2；签名完整，两架构初始化通过 |
+| v1.0.1 发行包 SHA-256 | `95b5b1141403898470379e6ceb2f3f8701253e6addb359433ba2315def4fe0f2` |
+
+以下 35 项测试以及构建、启动记录来自 **v1.0.0**，不是 v1.0.1 已重新执行的结果。本轮构建和包检查结果见上表；本轮自动测试结果以对应提交的 GitHub Actions 记录为准。
+
+## v1.0.0 已完成的验证
 
 | 检查 | 实际结果 |
 | --- | --- |
@@ -19,7 +31,7 @@
 
 构建机的 Swift 6.4 工具链在 x86_64 链接时提示某个兼容静态库仅包含 ARM slice；最终链接成功，x86_64 启动及全部合成核心测试通过。最低目标不等于已在 macOS 13 实机验证。
 
-## 合成测试覆盖
+## v1.0.0 合成测试覆盖
 
 `bash scripts/test.sh` 在当前主机架构编译并运行测试。全部文件均创建于唯一临时目录，使用布局替身；不访问真实桌面或 Finder。35 项覆盖：
 
@@ -45,7 +57,7 @@
 - 干净 Mac 下载后 Gatekeeper 首次打开，以及 Finder/桌面权限允许和拒绝的完整流程。
 - iCloud Desktop 切换、外接显示器变更和同步冲突的真实系统行为。
 
-本轮为避免影响已有工作环境，没有用真实私人文件重跑公开版隐藏操作。正式录制前，请用合成桌面文件在自己的系统上做一次短录屏检查。
+v1.0.0 验证时为避免影响已有工作环境，没有用真实私人文件重跑公开版隐藏操作。正式录制前，请用合成桌面文件在自己的系统上做一次短录屏检查。
 
 ## 复核命令
 
@@ -53,8 +65,8 @@
 bash scripts/test.sh
 python3 scripts/build.py
 python3 scripts/privacy_check.py
-xcrun lipo -archs dist/桌面文件一键隐身.app/Contents/MacOS/DesktopPrivacy
-codesign --verify --strict --all-architectures dist/桌面文件一键隐身.app
+xcrun lipo -archs dist/桌面文件隐身.app/Contents/MacOS/DesktopPrivacy
+codesign --verify --strict --all-architectures dist/桌面文件隐身.app
 ```
 
 发行 ZIP 的 SHA-256 见相同 Release 下的 `SHA256SUMS.txt`。构建机临时路径、真实用户文件名、原版名单和恢复快照均不写入此记录。

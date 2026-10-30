@@ -5,7 +5,7 @@ import Darwin
 /// Inject the two directories in tests; only current() resolves user locations.
 struct AppConfiguration {
     static let bundleIdentifier = "io.github.jayzengcodetrip.desktop-privacy"
-    static let displayName = "桌面文件一键隐身"
+    static let displayName = "桌面文件隐身"
 
     let desktopURL: URL
     let dataRoot: URL

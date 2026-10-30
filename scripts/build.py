@@ -12,9 +12,9 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 BUNDLE_ID = "io.github.jayzengcodetrip.desktop-privacy"
-APP_NAME = "桌面文件一键隐身"
+APP_NAME = "桌面文件隐身"
 EXECUTABLE = "DesktopPrivacy"
 ARCHITECTURES = ("arm64", "x86_64")
 MINIMUM_MACOS = "13.0"
@@ -59,7 +59,7 @@ def main() -> None:
             "CFBundleIdentifier": BUNDLE_ID,
             "CFBundleName": APP_NAME,
             "CFBundleDisplayName": APP_NAME,
-            "CFBundleVersion": "1",
+            "CFBundleVersion": "2",
             "CFBundleShortVersionString": VERSION,
             "CFBundlePackageType": "APPL",
             "LSMinimumSystemVersion": MINIMUM_MACOS,

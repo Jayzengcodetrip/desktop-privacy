@@ -230,7 +230,7 @@ final class FinderLayoutProvider: LayoutProvider {
         guard let error else { return }
         let code = error[NSAppleScript.errorNumber] as? Int ?? 0
         if code == -1743 {
-            throw PrivacyError("需要允许“桌面文件一键隐身”控制 Finder，才能保存和恢复图标位置。请到 系统设置 → 隐私与安全性 → 自动化，为“桌面文件一键隐身”打开 Finder，然后重试。")
+            throw PrivacyError("需要允许“桌面文件隐身”控制 Finder，才能保存和恢复图标位置。请到 系统设置 → 隐私与安全性 → 自动化，为“桌面文件隐身”打开 Finder，然后重试。")
         }
         throw PrivacyError("无法读取或恢复 Finder 桌面布局（\(code)）。\(error[NSAppleScript.errorMessage] as? String ?? "请稍后重试。")")
     }
@@ -247,7 +247,7 @@ final class FinderLayoutProvider: LayoutProvider {
         if let error {
             let code = error[NSAppleScript.errorNumber] as? Int ?? 0
             if code == -1743 {
-                throw PrivacyError("需要允许“桌面文件一键隐身”控制 Finder，才能保存和恢复图标位置。请到 系统设置 → 隐私与安全性 → 自动化，为“桌面文件一键隐身”打开 Finder，然后重试。")
+                throw PrivacyError("需要允许“桌面文件隐身”控制 Finder，才能保存和恢复图标位置。请到 系统设置 → 隐私与安全性 → 自动化，为“桌面文件隐身”打开 Finder，然后重试。")
             }
             throw PrivacyError("无法读取或恢复 Finder 桌面布局（\(code)）。\(error[NSAppleScript.errorMessage] as? String ?? "请稍后重试。")")
         }
