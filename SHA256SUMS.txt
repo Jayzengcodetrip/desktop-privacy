@@ -1,0 +1,2 @@
+1a20e53a4a619eee0ab5bde4f78c51b1668f8d554b86aabb7a8661cb9295e7b2  Desktop-Privacy-1.0.1-source.zip
+95b5b1141403898470379e6ceb2f3f8701253e6addb359433ba2315def4fe0f2  Desktop-Privacy-1.0.1-universal.zip
