@@ -1,0 +1,39 @@
+name: macOS build and isolated tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify native runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+      - name: Test isolated synthetic files and state
+        run: bash scripts/test.sh
+      - name: Build universal application
+        run: python3 scripts/build.py
+      - name: Check source and packaged application for private data
+        run: python3 scripts/privacy_check.py
+      - name: Verify packaged app signature
+        run: codesign --verify --strict --all-architectures dist/*.app
