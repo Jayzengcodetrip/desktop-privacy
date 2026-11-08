@@ -6,7 +6,7 @@
 
 当前版本为 **v1.1.1**：菜单栏眼睛默认隐藏全部桌面文件，指定文件功能保留为独立入口；新增 DMG 安装包。两种模式共用恢复流程，手动名单不会被全量操作覆盖。
 
-**[下载 Mac 安装包（DMG）](https://github.com/Jayzengcodetrip/desktop-privacy/releases/download/v1.1.1/Desktop-Privacy-1.1.1-universal.dmg)**
+**[下载 Mac 安装包（DMG）](https://github.com/Jayzengcodetrip/desktop-privacy/raw/1626104fe1b2457d89b9d794672f07dfa31f6cc2/Desktop-Privacy-1.1.1-universal.dmg)**
 
 M 系列与 Intel 使用同一个安装包，无需选择芯片版本。打开 DMG，把“桌面文件隐身”拖入其中的 **Applications（应用程序）**，再从“应用程序”启动。详细说明见下方“安装与首次打开”。
 
