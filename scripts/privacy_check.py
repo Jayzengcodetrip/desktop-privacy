@@ -2,7 +2,8 @@
 """Scan public sources and release bundles without storing a private denylist.
 
 The default scan covers this repository, excluding version-control metadata and
-Python bytecode caches. Pass an .app directory and/or .zip to inspect releases.
+Python bytecode caches. Pass an .app directory, .zip or .dmg to inspect releases.
+DMG contents are mounted read-only for inspection and detached afterward.
 Private terms may be supplied as a JSON string array in a separate local file or
 an environment variable. Matches are reported by index, never by their contents.
 """
@@ -15,8 +16,11 @@ import os
 from pathlib import Path, PurePosixPath
 import plistlib
 import re
+import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 import unicodedata
 import zipfile
 
@@ -159,28 +163,83 @@ class Checker:
         if path.is_file():
             self.scan_file(path, path.name)
             return
+        self.scan_tree(path)
+
+    def scan_tree(self, path: Path, prefix: str = "", disk_image_depth: int = 0,
+                  allow_applications_shortcut: bool = False) -> None:
         for current, directories, files in os.walk(path, followlinks=False):
             current_path = Path(current)
-            directories[:] = sorted(name for name in directories if name not in IGNORED_DIRECTORIES)
+            # Repository-only exclusions must not conceal files inside a release image.
+            directories[:] = sorted(name for name in directories
+                                    if disk_image_depth > 0 or name not in IGNORED_DIRECTORIES)
             for directory in list(directories):
                 candidate = current_path / directory
                 if candidate.is_symlink():
-                    self.fail(str(candidate.relative_to(path)), "directory symbolic link was not followed")
+                    if not (allow_applications_shortcut and candidate == path / "Applications"
+                            and os.readlink(candidate) == "/Applications"):
+                        self.fail(prefix + str(candidate.relative_to(path)), "directory symbolic link was not followed")
                     directories.remove(directory)
             for name in sorted(files):
                 candidate = current_path / name
-                location = str(candidate.relative_to(path))
+                location = prefix + str(candidate.relative_to(path))
                 if candidate.is_symlink():
-                    self.fail(location, "file symbolic link was not followed")
+                    if not (allow_applications_shortcut and candidate == path / "Applications"
+                            and os.readlink(candidate) == "/Applications"):
+                        self.fail(location, "file symbolic link was not followed")
                     continue
-                self.scan_file(candidate, location)
+                self.scan_file(candidate, location, disk_image_depth)
 
-    def scan_file(self, path: Path, location: str) -> None:
+    def scan_disk_image(self, path: Path, location: str, depth: int) -> None:
+        if depth >= MAX_ARCHIVE_DEPTH:
+            self.fail(location, "disk image nesting limit exceeded; contents were not fully checked")
+            return
+        if sys.platform != "darwin":
+            self.fail(location, "DMG inspection requires macOS; contents were not checked")
+            return
+        temporary = Path(tempfile.mkdtemp(prefix="desktop-privacy-dmg-audit-"))
+        mountpoint = temporary / "volume"
+        mountpoint.mkdir()
+        attached = False
+        device: str | None = None
+        try:
+            result = subprocess.run(
+                ["hdiutil", "attach", str(path), "-readonly", "-nobrowse", "-noautoopen",
+                 "-noautofsck", "-mountpoint", str(mountpoint), "-plist"],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+            )
+            attached = True
+            entities = plistlib.loads(result.stdout).get("system-entities", [])
+            for entity in entities:
+                candidate = entity.get("dev-entry", "")
+                if re.fullmatch(r"/dev/disk\d+", candidate):
+                    device = candidate
+                    break
+            mounts = [Path(entity["mount-point"]) for entity in entities if "mount-point" in entity]
+            if len(mounts) != 1 or mounts[0].resolve() != mountpoint.resolve() or not mountpoint.is_mount():
+                raise ValueError("Unexpected mounted disk image structure")
+            self.scan_tree(mountpoint, prefix=location + "!", disk_image_depth=depth + 1,
+                           allow_applications_shortcut=True)
+        except Exception as error:
+            self.fail(location, "disk image contents could not be fully checked: " + type(error).__name__)
+        finally:
+            if attached or mountpoint.is_mount():
+                try:
+                    subprocess.run(["hdiutil", "detach", device or str(mountpoint)], check=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                except Exception as error:
+                    self.fail(location, "disk image could not be detached: " + type(error).__name__)
+            # Never recursively remove a mounted volume, including after a failed detach.
+            if not mountpoint.is_mount():
+                shutil.rmtree(temporary)
+
+    def scan_file(self, path: Path, location: str, disk_image_depth: int = 0) -> None:
         try:
             if path.stat().st_size > MAX_ENTRY_BYTES:
                 self.fail(location, "file exceeds inspection size limit")
                 return
             self.scan_payload(location, path.name, path.read_bytes())
+            if path.suffix.lower() == ".dmg":
+                self.scan_disk_image(path, location, disk_image_depth)
         except Exception as error:
             self.fail(location, "file scan failed: " + type(error).__name__)
 

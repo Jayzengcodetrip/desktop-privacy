@@ -17,6 +17,8 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
     private var stateTitle: NSTextField!
     private var stateDetail: NSTextField!
     private var primaryButton: NSButton!
+    private var selectedButton: NSButton!
+    private var listHideButton: NSButton?
     private var listButton: NSButton!
     private var progress: NSProgressIndicator!
     private var isBusy = false
@@ -34,7 +36,7 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         buildWindow()
         refresh()
         showPanel(nil)
-        performOperation(title: "正在核对隐藏名单…") { [self] in
+        performOperation(title: "正在检查恢复记录…") { [self] in
             try service.initialize()
         }
     }
@@ -78,7 +80,7 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
     }
 
     private func buildWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 450),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 490),
                           styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "桌面文件隐身"
         window.isReleasedWhenClosed = false
@@ -94,23 +96,29 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
 
         stateTitle = label("桌面文件已显示", size: 23, weight: .semibold)
         stateTitle.alignment = .center
-        stateDetail = label("正在核对隐藏名单…", size: 13, weight: .regular)
+        stateDetail = label("正在检查恢复记录…", size: 13, weight: .regular)
         stateDetail.alignment = .center
         stateDetail.textColor = .secondaryLabelColor
         stateDetail.maximumNumberOfLines = 5
         stateDetail.preferredMaxLayoutWidth = 380
         stateDetail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        primaryButton = NSButton(title: "添加桌面文件…", target: self, action: #selector(primaryAction(_:)))
+        primaryButton = NSButton(title: "隐藏桌面全部文件", target: self, action: #selector(primaryAction(_:)))
         primaryButton.bezelStyle = .rounded
         primaryButton.controlSize = .large
         primaryButton.font = .systemFont(ofSize: 15, weight: .semibold)
         primaryButton.keyEquivalent = "\r"
         primaryButton.translatesAutoresizingMaskIntoConstraints = false
 
-        listButton = NSButton(title: "管理隐藏名单", target: self, action: #selector(showManagedList(_:)))
+        selectedButton = NSButton(title: "仅隐藏指定文件", target: self, action: #selector(hideAction(_:)))
+        selectedButton.bezelStyle = .rounded
+        selectedButton.controlSize = .small
+        listButton = NSButton(title: "管理指定文件", target: self, action: #selector(showManagedList(_:)))
         listButton.bezelStyle = .rounded
         listButton.controlSize = .small
+        let secondaryActions = NSStackView(views: [selectedButton, listButton])
+        secondaryActions.orientation = .horizontal
+        secondaryActions.spacing = 10
 
         progress = NSProgressIndicator()
         progress.style = .spinning
@@ -118,17 +126,18 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         progress.isDisplayedWhenStopped = false
         progress.translatesAutoresizingMaskIntoConstraints = false
 
-        let tip = label("每次隐藏前记录最新位置，恢复到该次隐藏前的布局。\n单击菜单栏图标即可切换 · 右键打开更多操作", size: 11, weight: .regular)
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
+        let tip = label("单击菜单栏眼睛：隐藏全部 / 恢复本次文件\n隐藏期间新放到桌面的文件，下次隐藏时纳入。\n每次隐藏前记录最新位置 · 版本 \(version)", size: 11, weight: .regular)
         tip.alignment = .center
         tip.textColor = .tertiaryLabelColor
 
-        let stack = NSStackView(views: [stateSymbol, stateTitle, stateDetail, primaryButton, listButton, tip])
+        let stack = NSStackView(views: [stateSymbol, stateTitle, stateDetail, primaryButton, secondaryActions, tip])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 14
         stack.setCustomSpacing(20, after: stateSymbol)
         stack.setCustomSpacing(22, after: stateDetail)
-        stack.setCustomSpacing(22, after: listButton)
+        stack.setCustomSpacing(22, after: secondaryActions)
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
         content.addSubview(progress)
@@ -161,11 +170,11 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         let action: String
         switch state.mode {
         case .visible:
-            title = state.count == 0 ? "还没有需要隐藏的文件" : "桌面文件已显示"
+            title = "桌面文件已显示"
             symbol = "eye"
-            action = state.count == 0 ? "添加桌面文件…" : "隐藏这 \(state.count) 项"
+            action = "隐藏桌面全部文件"
         case .hidden:
-            title = "这 \(state.count) 项已隐藏"
+            title = state.scope == .allDesktop ? "桌面 \(state.count) 项已隐藏" : "指定的 \(state.count) 项已隐藏"
             symbol = "eye.slash"
             action = "恢复桌面文件"
         case .recovery:
@@ -178,17 +187,17 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
             action = "重新检查"
         }
         stateTitle.stringValue = title
-        stateDetail.stringValue = state.mode == .visible && state.count == 0
-            ? "选择需要隐藏的桌面文件或文件夹。只有加入名单的项目会被隐藏。"
-            : state.detail
+        stateDetail.stringValue = state.detail
         stateSymbol.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
         stateSymbol.contentTintColor = state.mode == .blocked || state.mode == .recovery ? .systemOrange : .controlAccentColor
         primaryButton.title = action
         primaryButton.isEnabled = !isBusy
+        selectedButton.isEnabled = !isBusy && state.mode == .visible && !state.names.isEmpty
+        selectedButton.title = state.names.isEmpty ? "仅隐藏指定文件" : "仅隐藏指定的 \(state.names.count) 项"
         listButton.isEnabled = !isBusy
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
         statusItem.button?.image?.isTemplate = true
-        statusItem.button?.toolTip = "\(AppConfiguration.displayName)：\(title)\n单击切换，右键打开菜单"
+        statusItem.button?.toolTip = "\(AppConfiguration.displayName)：\(title)\n单击隐藏全部或恢复本次文件，右键管理指定文件"
         statusItem.button?.setAccessibilityLabel("\(AppConfiguration.displayName)：\(title)")
         refreshManagedList()
     }
@@ -213,10 +222,11 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         }
         item("显示控制面板", #selector(showPanel(_:)))
         menu.addItem(.separator())
-        item("隐藏这 \(state.count) 项", #selector(hideAction(_:)), enabled: state.mode == .visible && state.count > 0)
+        item("隐藏桌面全部文件", #selector(hideAllAction(_:)), enabled: state.mode == .visible)
+        item("仅隐藏指定的 \(state.names.count) 项", #selector(hideAction(_:)), enabled: state.mode == .visible && !state.names.isEmpty)
         item("恢复桌面文件", #selector(restoreAction(_:)), enabled: state.mode == .hidden || state.mode == .recovery)
         item("重新检查", #selector(validateAction(_:)))
-        item("管理隐藏名单", #selector(showManagedList(_:)))
+        item("管理指定文件…", #selector(showManagedList(_:)))
         menu.addItem(.separator())
         item("退出\(AppConfiguration.displayName)", #selector(quitAction(_:)))
         if let button = statusItem.button {
@@ -233,16 +243,21 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         guard !isBusy else { return }
         switch service.presentation.mode {
         case .visible:
-            if service.presentation.count == 0 { addDesktopFiles(sender) }
-            else { hideAction(sender) }
+            hideAllAction(sender)
         case .hidden, .recovery: restoreAction(sender)
         case .blocked: validateAction(sender)
         }
     }
 
+    @objc private func hideAllAction(_ sender: Any?) {
+        guard service.presentation.mode == .visible else { return }
+        performOperation(title: "正在保存位置并隐藏全部桌面文件…") { [self] in try service.hideAll() }
+    }
+
     @objc private func hideAction(_ sender: Any?) {
-        guard service.presentation.count > 0 else { showManagedList(sender); return }
-        performOperation(title: "正在保存位置并隐藏…") { [self] in try service.hide() }
+        guard service.presentation.mode == .visible else { return }
+        guard !service.presentation.names.isEmpty else { showManagedList(sender); return }
+        performOperation(title: "正在保存位置并隐藏指定文件…") { [self] in try service.hide() }
     }
 
     @objc private func restoreAction(_ sender: Any?) {
@@ -259,6 +274,7 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         guard !isBusy else { return }
         isBusy = true
         primaryButton.isEnabled = false
+        selectedButton.isEnabled = false
         listButton.isEnabled = false
         updateListControls()
         stateDetail.stringValue = title
@@ -299,13 +315,13 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         }
         let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        panel.title = "管理隐藏名单"
+        panel.title = "管理指定文件"
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(width: 480, height: 360)
         panel.center()
         let content = NSView()
         panel.contentView = content
-        let intro = label("只隐藏名单内的桌面项目。新增文件不会自动加入。", size: 13, weight: .regular)
+        let intro = label("指定隐藏只处理这份名单；菜单栏眼睛默认隐藏全部桌面文件。", size: 13, weight: .regular)
         intro.textColor = .secondaryLabelColor
         intro.translatesAutoresizingMaskIntoConstraints = false
         listIntro = intro
@@ -336,7 +352,10 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         remove.bezelStyle = .rounded
         addButton = add
         removeButton = remove
-        let buttons = NSStackView(views: [add, remove])
+        let hide = NSButton(title: "隐藏名单中的文件", target: self, action: #selector(hideAction(_:)))
+        hide.bezelStyle = .rounded
+        listHideButton = hide
+        let buttons = NSStackView(views: [add, remove, hide])
         buttons.orientation = .horizontal
         buttons.spacing = 10
         buttons.translatesAutoresizingMaskIntoConstraints = false
@@ -373,7 +392,7 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         let selectedNames = Set(table.selectedRowIndexes.compactMap { listNames.indices.contains($0) ? listNames[$0] : nil })
         let state = service.presentation
         listNames = state.names
-        listWindow?.title = "管理隐藏名单 · \(state.count) 项"
+        listWindow?.title = "管理指定文件 · \(state.names.count) 项"
         table.reloadData()
         let selection = IndexSet(listNames.indices.filter { selectedNames.contains(listNames[$0]) })
         table.selectRowIndexes(selection, byExtendingSelection: false)
@@ -385,15 +404,16 @@ final class PrivacyAppDelegate: NSObject, NSApplicationDelegate, NSTableViewData
         let canEdit = !isBusy && state.mode == .visible
         addButton?.isEnabled = canEdit
         removeButton?.isEnabled = canEdit && (listTable?.numberOfSelectedRows ?? 0) > 0
+        listHideButton?.isEnabled = canEdit && !state.names.isEmpty
         switch state.mode {
         case .hidden, .recovery:
             listIntro?.stringValue = "请先恢复桌面文件，再添加或移除名单项目。当前名单仍可查看。"
         case .blocked:
             listIntro?.stringValue = "请先在控制面板完成检查，再修改名单。当前名单仍可查看。"
         case .visible:
-            listIntro?.stringValue = state.count == 0
-                ? "名单为空。添加需要临时隐藏的桌面文件或文件夹。"
-                : "只隐藏名单内的桌面项目。新增文件不会自动加入。"
+            listIntro?.stringValue = state.names.isEmpty
+                ? "添加需要单独隐藏的桌面文件或文件夹。隐藏全部无需添加名单。"
+                : "指定隐藏只处理这份名单；菜单栏眼睛默认隐藏全部桌面文件。"
         }
     }
 

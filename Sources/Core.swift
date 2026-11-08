@@ -2,16 +2,23 @@ import Foundation
 import Darwin
 
 enum PrivacyMode: Equatable { case visible, hidden, recovery, blocked }
+enum HideScope: String, Codable { case selected, allDesktop }
 struct PrivacyPresentation {
     let mode: PrivacyMode
     let count: Int
     let names: [String]
     let detail: String
+    let scope: HideScope?
+
+    init(mode: PrivacyMode, count: Int, names: [String], detail: String, scope: HideScope? = nil) {
+        self.mode = mode; self.count = count; self.names = names; self.detail = detail; self.scope = scope
+    }
 }
 protocol PrivacyService: AnyObject {
     var presentation: PrivacyPresentation { get }
     func initialize() throws
     func hide() throws
+    func hideAll() throws
     func restore() throws
     func validate() throws
     func addTargets(_ urls: [URL]) throws
@@ -78,6 +85,10 @@ struct RecoverySession: Codable {
     let observers: [SavedObserver]
     var restoreObservers: [SavedObserver]?
     var rollback: Bool
+    // Optional fields preserve decoding of the original schema 1 journals.
+    var scope: HideScope? = nil
+    var desktopIdentity: FileIdentity? = nil
+    var desktopPath: String? = nil
 }
 struct SavedObserver: Codable { let target: TargetFile; let position: DesktopPoint }
 struct DiskItem {
@@ -85,6 +96,7 @@ struct DiskItem {
     let identity: FileIdentity
     let flags: UInt32
     let mode: mode_t
+    let linkCount: UInt64
 }
 
 final class DesktopPrivacyService: PrivacyService {
@@ -92,14 +104,28 @@ final class DesktopPrivacyService: PrivacyService {
     let dataRoot: URL
     let layout: any LayoutProvider
     private var session: RecoverySession?
+    private var recoveryRecordInvalid = false
     private var ready = false
-    private var detail = "固定名单内的文件会临时隐藏，其他文件保持原样。"
+    private var detail = "单击眼睛隐藏当前桌面全部文件，也可单独隐藏指定名单。"
     // Injection is used only by isolated tests, never by the app.
     var afterFlagChangeForTest: ((Int) throws -> Void)?
     private var stateURL: URL { dataRoot.appendingPathComponent("recovery.json") }
     var presentation: PrivacyPresentation {
-        let mode: PrivacyMode = !ready ? .blocked : (session == nil ? .visible : (session!.phase == "hidden" ? .hidden : .recovery))
-        return .init(mode: mode, count: manifest.targets.count, names: manifest.targets.map(\.name), detail: detail)
+        let mode: PrivacyMode
+        // A failed initialization or damaged journal must not look like a safe,
+        // ordinary blocked state that permits quitting without a recovery warning.
+        if recoveryRecordInvalid || (!ready && FileManager.default.fileExists(atPath: stateURL.path)) {
+            mode = .recovery
+        } else if !ready {
+            mode = .blocked
+        } else if let session {
+            mode = session.phase == "hidden" ? .hidden : .recovery
+        } else {
+            mode = .visible
+        }
+        return .init(mode: mode, count: session?.targets.count ?? manifest.targets.count,
+                     names: manifest.targets.map(\.name), detail: detail,
+                     scope: session.map { $0.scope ?? .selected })
     }
     init(manifest: FixedManifest, dataRoot: URL, layout: any LayoutProvider) {
         self.manifest = manifest; self.dataRoot = dataRoot; self.layout = layout
@@ -121,7 +147,7 @@ final class DesktopPrivacyService: PrivacyService {
                 try reloadSession()
                 if !FileManager.default.fileExists(atPath: storedManifest.path) { try atomicWrite(manifest, to: storedManifest) }
                 ready = true
-                detail = session == nil ? "固定名单已就绪。隐藏前会保存位置，恢复后会逐项核对。" : "已找到上次保存的恢复记录，可继续恢复文件和位置。"
+                detail = session == nil ? "单击眼睛隐藏当前桌面全部文件。原来的指定名单仍可单独使用，隐藏前会保存最新位置。" : "已找到上次保存的恢复记录，可继续恢复文件和位置。"
             }
         } catch { ready = false; detail = error.localizedDescription; throw error }
     }
@@ -129,24 +155,47 @@ final class DesktopPrivacyService: PrivacyService {
         if !ready { try initialize() }
         try locked {
             try checkDesktop(); try reloadSession()
-            let items = try inventory()
-            for target in manifest.targets { _ = try resolve(target, items: items) }
-            if session == nil {
-                try layout.checkVisibilitySettings()
-                _ = try layout.snapshot(names: visibleNames(items))
+            if session != nil {
+                detail = "恢复记录可用；点击恢复即可继续。"
+                return
             }
-            detail = session == nil ? "\(manifest.targets.count) 项固定名单及桌面布局检查通过，可以隐藏。" : "恢复记录可用；点击恢复即可继续。"
+            let items = try inventory()
+            // The optional manual list must not block the default all-desktop
+            // operation or recovery when an old selected item has been removed.
+            try layout.checkVisibilitySettings()
+            _ = try layout.snapshot(names: visibleNames(items))
+            detail = "桌面布局检查完成。隐藏全部时会重新读取当前文件；指定名单会在单独隐藏时核对。"
         }
     }
-    func hide() throws {
+    func hide() throws { try hide(scope: .selected) }
+    func hideAll() throws { try hide(scope: .allDesktop) }
+
+    private func hide(scope: HideScope) throws {
         guard ready else { throw PrivacyError("请先重新打开工具完成检查。") }
         try locked {
             try checkDesktop(); try reloadSession()
             guard session == nil else { throw PrivacyError("还有尚未完成的恢复记录，请先恢复。") }
-            guard !manifest.targets.isEmpty else { throw PrivacyError("名单为空，请先添加要隐藏的桌面文件。") }
-            try layout.checkVisibilitySettings()
             let items = try inventory()
-            let resolved = try manifest.targets.map { try resolve($0, items: items) }
+            let resolved: [DiskItem]
+            if scope == .allDesktop {
+                let visible = Set(visibleNames(items))
+                resolved = try items.filter { visible.contains($0.name) }
+                    .sorted { $0.name < $1.name }.map { try safeItem($0) }
+                guard !resolved.isEmpty else {
+                    detail = "桌面当前没有需要隐藏的文件。原有隐藏项目和指定名单均保持原样。"
+                    return
+                }
+            } else {
+                guard !manifest.targets.isEmpty else { throw PrivacyError("名单为空，请先添加要隐藏的桌面文件。") }
+                resolved = try manifest.targets.map { try resolve($0, items: items) }
+            }
+            guard Set(resolved.map(\.identity)).count == resolved.count else {
+                throw PrivacyError("桌面中有多个项目指向同一文件（硬链接）。为保证可以完整恢复，本次未隐藏任何文件。")
+            }
+            guard !resolved.contains(where: { $0.mode & S_IFMT == S_IFREG && $0.linkCount > 1 }) else {
+                throw PrivacyError("待隐藏文件存在硬链接，其他位置的同一文件也会受到影响。本次未隐藏任何文件。")
+            }
+            try layout.checkVisibilitySettings()
             guard resolved.allSatisfy({ $0.flags & UInt32(UF_HIDDEN) == 0 }) else {
                 throw PrivacyError("名单中有文件已被其他方式隐藏。为避免改变原状态，请先恢复这些文件。")
             }
@@ -163,7 +212,9 @@ final class DesktopPrivacyService: PrivacyService {
                 guard !targetIDs.contains(item.identity), let point = before.positions[item.name] else { return nil }
                 return SavedObserver(target: .init(name: item.name, identity: item.identity), position: point)
             }
-            let recovery = RecoverySession(schema: 1, created: Date(), phase: "hiding", layout: before, targets: saved, observers: observers, restoreObservers: nil, rollback: false)
+            let recovery = RecoverySession(schema: 2, created: Date(), phase: "hiding", layout: before,
+                                           targets: saved, observers: observers, restoreObservers: nil, rollback: false,
+                                           scope: scope, desktopIdentity: manifest.desktopIdentity, desktopPath: manifest.desktop)
             try save(recovery) // Durable journal exists before the first attribute mutation.
             do {
                 for (index, item) in saved.enumerated() {
@@ -178,13 +229,18 @@ final class DesktopPrivacyService: PrivacyService {
                 let others = visibleNames(afterItems)
                 let after = try layout.snapshot(names: others)
                 try checkConfiguration(before, after)
+                if scope == .allDesktop && !others.isEmpty {
+                    throw PrivacyError("隐藏期间桌面出现了新的可见项目，已停止并尝试恢复，请稍后重新隐藏全部。")
+                }
                 for name in others {
                     if let old = before.positions[name], after.positions[name] != old {
                         throw PrivacyError("Finder 改变了名单外项目的位置，已停止隐藏并尝试恢复。")
                     }
                 }
                 var completed = recovery; completed.phase = "hidden"; try save(completed)
-                detail = "已隐藏 \(saved.count) 项。其他桌面文件仍然可用，位置恢复记录已保存。"
+                detail = scope == .allDesktop
+                    ? "已隐藏当前桌面的全部 \(saved.count) 项，位置恢复记录已保存。之后新建或移入桌面的文件会正常显示。"
+                    : "已隐藏指定名单中的 \(saved.count) 项。其他桌面文件仍然可用，位置恢复记录已保存。"
             } catch {
                 let cause = error.localizedDescription
                 do {
@@ -232,7 +288,7 @@ final class DesktopPrivacyService: PrivacyService {
         detail = "名单已保存，共 \(targets.count) 项。从名单移除不会删除真实文件。"
     }
     func restore() throws {
-        guard ready else { throw PrivacyError("请重新打开工具后恢复。") }
+        if !ready { try initialize() }
         try locked { try checkDesktop(); try reloadSession(); try restoreLocked() }
     }
     private func restoreLocked() throws {
@@ -345,16 +401,47 @@ final class DesktopPrivacyService: PrivacyService {
     }
     private func reloadSession() throws {
         if FileManager.default.fileExists(atPath: stateURL.path) {
-            let loaded = try JSONDecoder().decode(RecoverySession.self, from: Data(contentsOf: stateURL))
-            guard loaded.schema == 1, loaded.targets.count == manifest.targets.count,
-                  Set(loaded.targets.map { $0.target.identity }).count == manifest.targets.count,
-                  loaded.targets.allSatisfy({ s in manifest.targets.contains { $0.identity == s.target.identity } && validName(s.target.name) }) else {
-                throw PrivacyError("恢复记录与固定名单不符，已停止操作，未改动文件。")
+            do {
+                let loaded = try JSONDecoder().decode(RecoverySession.self, from: Data(contentsOf: stateURL))
+                guard !loaded.targets.isEmpty,
+                      ["hiding", "hidden", "restoring", "recovery", "restored"].contains(loaded.phase),
+                      Set(loaded.targets.map { $0.target.identity }).count == loaded.targets.count,
+                      Set(loaded.targets.map { $0.target.name }).count == loaded.targets.count,
+                      loaded.targets.allSatisfy({ validName($0.target.name) && validPoint($0.position) }),
+                      (loaded.observers + (loaded.restoreObservers ?? [])).allSatisfy({ validName($0.target.name) && validPoint($0.position) }) else {
+                    throw PrivacyError("恢复记录的文件或位置信息不完整。")
+                }
+                switch loaded.schema {
+                case 1:
+                    guard loaded.scope == nil || loaded.scope == .selected,
+                          loaded.targets.count == manifest.targets.count,
+                          loaded.targets.allSatisfy({ s in manifest.targets.contains { $0.identity == s.target.identity } }) else {
+                        throw PrivacyError("旧版恢复记录与指定名单不符。")
+                    }
+                case 2:
+                    guard loaded.scope != nil, loaded.desktopPath == manifest.desktop,
+                          loaded.desktopIdentity == manifest.desktopIdentity else {
+                        throw PrivacyError("恢复记录不属于当前桌面。")
+                    }
+                default:
+                    throw PrivacyError("恢复记录的版本不受支持。")
+                }
+                session = loaded
+                recoveryRecordInvalid = false
+            } catch {
+                session = nil
+                recoveryRecordInvalid = true
+                detail = "恢复记录无法核对，已保留原记录并停止改动文件。\(error.localizedDescription)"
+                throw PrivacyError(detail)
             }
-            session = loaded
-        } else { session = nil }
+        } else { session = nil; recoveryRecordInvalid = false }
     }
-    private func save(_ value: RecoverySession) throws { try atomicWrite(value, to: stateURL); session = value }
+    private func save(_ value: RecoverySession) throws {
+        try atomicWrite(value, to: stateURL); session = value; recoveryRecordInvalid = false
+    }
+    private func validPoint(_ point: DesktopPoint) -> Bool {
+        point.x > -100_000 && point.x < 100_000 && point.y > -100_000 && point.y < 100_000
+    }
     private func validName(_ name: String) -> Bool { !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\0") }
     private func checkDesktop() throws {
         var s = stat()
@@ -365,7 +452,8 @@ final class DesktopPrivacyService: PrivacyService {
         try FileManager.default.contentsOfDirectory(atPath: manifest.desktop).map { name in
             var s = stat(); let path = URL(fileURLWithPath: manifest.desktop).appendingPathComponent(name).path
             guard lstat(path, &s) == 0 else { throw PrivacyError("无法读取桌面项目“\(name)”。") }
-            return DiskItem(name: name, identity: .init(s), flags: s.st_flags, mode: s.st_mode)
+            return DiskItem(name: name, identity: .init(s), flags: s.st_flags, mode: s.st_mode,
+                            linkCount: UInt64(s.st_nlink))
         }
     }
     private func visibleNames(_ items: [DiskItem]) -> [String] {
@@ -391,6 +479,11 @@ final class DesktopPrivacyService: PrivacyService {
         defer { close(fd) }
         var s = stat()
         guard fstat(fd, &s) == 0, FileIdentity(s) == target.identity else { throw PrivacyError("“\(found.name)”在操作期间被替换，已停止。") }
+        // Recheck immediately before hiding in case another link appeared after
+        // preflight. Restore remains available for a previously recorded file.
+        if hidden && s.st_mode & S_IFMT == S_IFREG && s.st_nlink > 1 {
+            throw PrivacyError("“\(found.name)”出现了硬链接，继续隐藏会影响其他位置，已停止。")
+        }
         let flags = hidden ? s.st_flags | UInt32(UF_HIDDEN) : s.st_flags & ~UInt32(UF_HIDDEN)
         if flags != s.st_flags, fchflags(fd, flags) != 0 { throw PrivacyError("无法改变“\(found.name)”的显示状态：\(String(cString: strerror(errno)))") }
         var after = stat()

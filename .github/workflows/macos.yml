@@ -31,6 +31,8 @@ jobs:
         run: test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
       - name: Test isolated synthetic files and state
         run: bash scripts/test.sh
+      - name: Test disk image privacy checks and package retention
+        run: python3 scripts/test_packaging.py
       - name: Build universal application
         run: python3 scripts/build.py
       - name: Check source and packaged application for private data

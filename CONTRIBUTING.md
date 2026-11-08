@@ -1,6 +1,6 @@
 # 贡献指南
 
-欢迎提交可复现的问题和改进。请优先保持工具的范围清楚：用户自己选择桌面顶层项目，应用只临时隐藏这些项目，并保护本次隐藏前的布局。
+欢迎提交可复现的问题和改进。开发前先读 [AGENTS.md](AGENTS.md) 与 [决策记录](决策记录.md)，项目结构、保护规则、版本与收工流程以 AGENTS.md 为准。应用默认隐藏当前桌面全部可见文件，也保留用户自选名单；两种方式均只临时隐藏本次目标，并保护本次隐藏前的布局。
 
 ## 开发与检查
 
@@ -11,7 +11,7 @@ python3 scripts/build.py
 bash scripts/test.sh
 ```
 
-发行目标是 macOS 13 及以上，`arm64` 与 `x86_64` 合并为同一 Universal 2 应用。两个架构成功编译不等于两种机器上均已实测；Rosetta 结果也需要单独记录。请在 [验证记录](docs/VERIFICATION.md) 中写明环境、命令、实际结果和未覆盖的部分。[Apple 的 Universal binary 文档](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary) 解释了两种架构与 Rosetta 测试的区别。
+发行目标是 macOS 13 及以上，`arm64` 与 `x86_64` 合并为同一 Universal 2 应用。两个架构成功编译不等于两种机器上均已实测；Rosetta 结果也需要单独记录。每次交付在 `版本报告/` 写明环境、命令、实际结果和未覆盖的部分；[历史验证记录](docs/VERIFICATION.md) 保留旧版证据。[Apple 的 Universal binary 文档](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary) 解释了两种架构与 Rosetta 测试的区别。
 
 ## 必须保留的行为
 
@@ -21,7 +21,7 @@ bash scripts/test.sh
 - 隐藏前检查文件身份、权限与桌面布局；不根据同名就操作替换后的文件。
 - 自动排序、叠放或显示配置变化等情况下，拒绝不安全的位置写入，不擅自修改用户设置。
 - 恢复记录应在操作失败或进程中断后保留；全部核对完成后才清理。
-- 名单外项目保持可见，不应因为恢复而丢失用户后来主动调整的位置。
+- 指定模式的名单外项目保持可见；全量模式不覆盖手动名单，不跟踪隐藏完成后新增的文件；恢复不应丢失用户后来主动调整的其他项目位置。
 - 不增加遥测、上传、网络服务或隐含外部依赖。
 
 不要用“文件仍存在”“测试命令退出为零”代替位置恢复和真实桌面操作的验证。

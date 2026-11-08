@@ -860,6 +860,377 @@ test("public configuration refuses a missing desktop without creating or selecti
     }
 }
 
+test("hide all works with an empty manual list and never changes that list") {
+    try Fixture("all-empty-list").withCleanup { f in
+        try f.service.removeTargets(named: [f.first, f.folder])
+        let manifest = try storedManifestBytes(f)
+        let before = try fileTreeSnapshot(f.desktop)
+        let children = try fileTreeSnapshot(f.url(f.folder))
+        try f.service.hideAll()
+        try require(f.service.presentation.mode == .hidden, "All-desktop action did not hide")
+        try require(f.service.presentation.scope == .allDesktop, "All-desktop scope was lost")
+        try require(f.service.presentation.count == 3 && f.service.presentation.names.isEmpty,
+                    "Active count and manual list count were mixed")
+        for name in [f.first, f.folder, f.other] {
+            try require(try isHidden(f.url(name)), "All-desktop action missed a visible target")
+        }
+        // Compare descendants independently because the chosen top-level folder itself is hidden.
+        let hiddenChildren = try fileTreeSnapshot(f.url(f.folder))
+        try require(hiddenChildren.filter { $0.key != "." } == children.filter { $0.key != "." },
+                    "All-desktop action recursively changed folder contents")
+        try require(try storedManifestBytes(f) == manifest, "All-desktop action rewrote the empty manual list")
+        try f.service.restore()
+        try require(try fileTreeSnapshot(f.desktop) == before, "All-desktop round trip altered file data or attributes")
+        try require(try storedManifestBytes(f) == manifest, "All-desktop restore rewrote the manual list")
+        try require(f.service.presentation.count == 0 && f.service.presentation.scope == nil,
+                    "Completed all-desktop session remained active")
+    }
+}
+
+test("all-desktop restart restores its own targets while retaining manual selection") {
+    try Fixture("all-restart").withCleanup { f in
+        let manifest = try storedManifestBytes(f)
+        try f.service.hideAll()
+        try require(f.service.presentation.count == 3 && f.service.presentation.names.count == 2,
+                    "All-desktop count incorrectly used the manual list")
+        for name in [f.first, f.folder, f.other] { f.layout.positions[name] = DesktopPoint(x: 900, y: 700) }
+        let reopened = DesktopPrivacyService(manifest: f.manifest, dataRoot: f.data, layout: f.layout)
+        try reopened.initialize()
+        try require(reopened.presentation.scope == .allDesktop && reopened.presentation.count == 3,
+                    "Reopened all-desktop session was bound to manual selection")
+        try reopened.restore()
+        try require(f.layout.positions == f.originalPoints, "All-desktop restart did not restore saved positions")
+        try require(try storedManifestBytes(f) == manifest, "Restart modified the manual manifest")
+        try reopened.hide()
+        try require(reopened.presentation.scope == .selected && reopened.presentation.count == 2,
+                    "Original manual hide action no longer targets the selected list")
+        try require(!(try isHidden(f.url(f.other))), "Manual hide inherited a prior all-desktop target")
+        try reopened.restore()
+    }
+}
+
+test("all-desktop hiding preserves existing hidden and dot files") {
+    try Fixture("all-prehidden").withCleanup { f in
+        let dot = ".existing-metadata"
+        let hidden = "already-hidden.txt"
+        try Data("dot content".utf8).write(to: f.url(dot))
+        try Data("already hidden".utf8).write(to: f.url(hidden))
+        try setFixtureFlags(f.url(hidden), UInt32(UF_HIDDEN | UF_NODUMP))
+        let before = try fileTreeSnapshot(f.desktop)
+        try f.service.hideAll()
+        try require(f.service.presentation.count == 3, "Previously invisible items entered the all-desktop session")
+        try require(!(try isHidden(f.url(dot))), "Dot file flags were modified")
+        try f.service.restore()
+        try require(try isHidden(f.url(hidden)), "Restore exposed a file hidden before this session")
+        try require(try fileTreeSnapshot(f.desktop) == before, "Previously invisible files or data were changed")
+    }
+}
+
+test("new files join the next all-desktop action without joining the manual list") {
+    try Fixture("all-next-batch").withCleanup { f in
+        let manifest = try storedManifestBytes(f)
+        try f.service.hideAll()
+        let added = "new-while-hidden.txt"
+        try Data("new file".utf8).write(to: f.url(added))
+        let addedPoint = DesktopPoint(x: 800, y: 120)
+        f.layout.positions[added] = addedPoint
+        try require(!(try isHidden(f.url(added))), "A newly created file was silently captured during the session")
+        try f.service.restore()
+        try require(f.layout.positions[added] == addedPoint, "Restore moved a newly created file")
+        try f.service.hideAll()
+        try require(try isHidden(f.url(added)), "Next all-desktop action missed the new file")
+        try require(f.service.presentation.count == 4, "Next all-desktop count did not refresh")
+        try require(try storedManifestBytes(f) == manifest, "New all-desktop file polluted manual selection")
+        try f.service.restore()
+        try require(!(try isHidden(f.url(added))) && f.layout.positions[added] == addedPoint,
+                    "New all-desktop target did not restore")
+    }
+}
+
+test("a file appearing during all-desktop hiding triggers rollback instead of false success") {
+    try Fixture("all-concurrent-new-file").withCleanup { f in
+        let added = "arrived-during-hide.txt"
+        let addedPoint = DesktopPoint(x: 850, y: 180)
+        f.service.afterFlagChangeForTest = { index in
+            if index == 0 {
+                try Data("concurrent addition".utf8).write(to: f.url(added))
+                f.layout.positions[added] = addedPoint
+            }
+        }
+        try expectError("concurrent visible desktop addition") { try f.service.hideAll() }
+        try require(f.service.presentation.mode == .visible, "Concurrent addition left an active hidden session")
+        for name in [f.first, f.folder, f.other, added] {
+            try require(!(try isHidden(f.url(name))), "Concurrent addition rollback left hidden files")
+        }
+        try require(f.layout.positions[added] == addedPoint, "Rollback changed the newly arrived file's position")
+        try require(!fm.fileExists(atPath: f.journal.path), "Successful concurrent-addition rollback retained its journal")
+    }
+}
+
+test("all-desktop partial hide failure rolls back every changed target") {
+    try Fixture("all-rollback").withCleanup { f in
+        let before = try fileTreeSnapshot(f.desktop)
+        let manifest = try storedManifestBytes(f)
+        var journalSeen = false
+        f.service.afterFlagChangeForTest = { index in
+            let record = try JSONDecoder().decode(RecoverySession.self, from: Data(contentsOf: f.journal))
+            journalSeen = record.targets.count == 3
+            if index == 1 { throw TestFailure("Injected all-desktop hide failure") }
+        }
+        try expectError("all-desktop partial failure") { try f.service.hideAll() }
+        try require(journalSeen, "All-desktop mutation began without a complete recovery journal")
+        try require(try fileTreeSnapshot(f.desktop) == before, "Failed all-desktop hide left changed file flags or data")
+        try require(!fm.fileExists(atPath: f.journal.path), "Successful all-desktop rollback retained an active session")
+        try require(try storedManifestBytes(f) == manifest, "All-desktop rollback altered manual list")
+    }
+}
+
+test("interrupted all-desktop journal reopens without depending on manual targets") {
+    try Fixture("all-interrupted").withCleanup { f in
+        try f.service.hideAll()
+        var interrupted = try JSONDecoder().decode(RecoverySession.self, from: Data(contentsOf: f.journal))
+        interrupted.phase = "hiding"
+        try atomicWrite(interrupted, to: f.journal)
+        // Simulate termination after one of the three file-flag writes.
+        try setFixtureFlags(f.url(f.first), 0)
+        try setFixtureFlags(f.url(f.folder), 0)
+        let reopened = DesktopPrivacyService(manifest: f.manifest, dataRoot: f.data, layout: f.layout)
+        try reopened.initialize()
+        try require(reopened.presentation.mode == .recovery && reopened.presentation.count == 3,
+                    "Interrupted all-desktop session was not recoverable")
+        try reopened.restore()
+        for name in [f.first, f.folder, f.other] {
+            try require(!(try isHidden(f.url(name))), "Interrupted all-desktop session left a hidden target")
+        }
+        try require(!fm.fileExists(atPath: f.journal.path), "Interrupted all-desktop recovery did not finish")
+    }
+}
+
+test("all-desktop restore rejects replacements but restores remaining original files") {
+    try Fixture("all-replacement").withCleanup { f in
+        try f.service.hideAll()
+        let original = f.root.appendingPathComponent("parked-original.txt")
+        try fm.moveItem(at: f.url(f.other), to: original)
+        let replacement = Data("replacement must remain untouched".utf8)
+        try replacement.write(to: f.url(f.other))
+        try expectError("all-desktop replacement") { try f.service.restore() }
+        try require(!(try isHidden(f.url(f.first))) && !(try isHidden(f.url(f.folder))),
+                    "Missing all-desktop target blocked other originals from restoring")
+        try require(!(try isHidden(f.url(f.other))) && Data(contentsOf: f.url(f.other)) == replacement,
+                    "All-desktop restore modified the same-name replacement")
+        try require(try isHidden(original), "All-desktop restore reached outside the desktop")
+        try require(fm.fileExists(atPath: f.journal.path), "Unresolved all-desktop target lost its recovery record")
+        try fm.removeItem(at: f.url(f.other))
+        try fm.moveItem(at: original, to: f.url(f.other))
+        try f.service.restore()
+        try require(!(try isHidden(f.url(f.other))), "Returned all-desktop original did not recover")
+    }
+}
+
+test("stale manual targets do not block all-desktop hide validate or recovery") {
+    try Fixture("all-stale-list").withCleanup { f in
+        let manifest = try storedManifestBytes(f)
+        try fm.moveItem(at: f.url(f.first), to: f.root.appendingPathComponent("moved-manual.txt"))
+        f.layout.positions.removeValue(forKey: f.first)
+        try f.service.validate()
+        try f.service.hideAll()
+        try require(f.service.presentation.count == 2, "All-desktop action retained a missing manual target")
+        try f.service.validate()
+        let reopened = DesktopPrivacyService(manifest: f.manifest, dataRoot: f.data, layout: f.layout)
+        try reopened.initialize()
+        try reopened.restore()
+        try require(try storedManifestBytes(f) == manifest, "All-desktop operation repaired or rewrote the user's list")
+        try expectError("manual list still protects missing originals") { try reopened.hide() }
+        try require(!(try isHidden(f.url(f.folder))) && !(try isHidden(f.url(f.other))),
+                    "Failed manual hide changed files after all-desktop recovery")
+    }
+}
+
+test("manual and all-desktop sessions cannot overlap or change selection while hidden") {
+    try Fixture("all-mode-exclusion").withCleanup { f in
+        try f.service.hide()
+        let manualJournal = try Data(contentsOf: f.journal)
+        try expectError("all-desktop over manual session") { try f.service.hideAll() }
+        try require(try Data(contentsOf: f.journal) == manualJournal, "All-desktop action replaced a manual session")
+        try require(!(try isHidden(f.url(f.other))), "Rejected all-desktop action changed an unselected file")
+        try f.service.restore()
+        try f.service.hideAll()
+        let allJournal = try Data(contentsOf: f.journal)
+        let manifest = try storedManifestBytes(f)
+        try expectError("manual over all-desktop session") { try f.service.hide() }
+        try expectError("second all-desktop session") { try f.service.hideAll() }
+        try expectError("edit during all-desktop session") { try f.service.removeTargets(named: [f.first]) }
+        try require(try Data(contentsOf: f.journal) == allJournal, "Rejected second action changed all-desktop session")
+        try require(try storedManifestBytes(f) == manifest, "Rejected edit changed manual list")
+        try f.service.restore()
+    }
+}
+
+test("all-desktop rejects visible symbolic links without hiding any file") {
+    try Fixture("all-symlink").withCleanup { f in
+        let linkName = "desktop-link"
+        try fm.createSymbolicLink(at: f.url(linkName), withDestinationURL: f.url(f.first))
+        f.layout.positions[linkName] = DesktopPoint(x: 700, y: 500)
+        let before = try fileTreeSnapshot(f.desktop)
+        try expectError("visible symlink") { try f.service.hideAll() }
+        try require(try fileTreeSnapshot(f.desktop) == before, "Symlink rejection left partial all-desktop changes")
+        try require(!fm.fileExists(atPath: f.journal.path), "Unsupported symlink created a journal")
+    }
+}
+
+test("all-desktop rejects duplicate hard-link identities before persisting a journal") {
+    try Fixture("all-hardlink").withCleanup { f in
+        let linkName = "second-hard-link.txt"
+        try require(link(f.url(f.first).path, f.url(linkName).path) == 0, "Could not create fixture hard link")
+        f.layout.positions[linkName] = DesktopPoint(x: 700, y: 500)
+        let before = try fileTreeSnapshot(f.desktop)
+        try expectError("duplicate file identity") { try f.service.hideAll() }
+        try require(try fileTreeSnapshot(f.desktop) == before, "Hard-link rejection mutated shared file flags")
+        try require(!fm.fileExists(atPath: f.journal.path), "Unrecoverable duplicate identities entered a journal")
+    }
+}
+
+test("desktop files with hard links outside the desktop cannot hide in either mode") {
+    try Fixture("outside-hardlink").withCleanup { f in
+        let outside = f.root.appendingPathComponent("outside-desktop-hard-link.txt")
+        try require(link(f.url(f.first).path, outside.path) == 0, "Could not create outside fixture hard link")
+        let before = try fileTreeSnapshot(f.desktop)
+        let outsideBefore = try fileStat(outside)
+        let outsideContents = try Data(contentsOf: outside)
+        let manifest = try storedManifestBytes(f)
+        try expectError("all-desktop target has an outside hard link") { try f.service.hideAll() }
+        try expectError("manual target has an outside hard link") { try f.service.hide() }
+        try require(try fileTreeSnapshot(f.desktop) == before, "Rejected outside hard link altered desktop files")
+        try require(try fileStat(outside).st_flags == outsideBefore.st_flags,
+                    "Hiding changed flags through an outside hard link")
+        try require(try Data(contentsOf: outside) == outsideContents, "Outside hard-link contents changed")
+        try require(!fm.fileExists(atPath: f.journal.path), "Outside hard-link rejection left a recovery journal")
+        try require(try storedManifestBytes(f) == manifest, "Outside hard-link rejection rewrote the manual list")
+    }
+}
+
+test("outside hard link added during hiding stops and rolls back the batch") {
+    try Fixture("concurrent-outside-hardlink").withCleanup { f in
+        let outside = f.root.appendingPathComponent("late-outside-hard-link.txt")
+        var linkedName: String?
+        f.service.afterFlagChangeForTest = { index in
+            guard index == 0 else { return }
+            for name in [f.first, f.other] where !(try isHidden(f.url(name))) {
+                try require(link(f.url(name).path, outside.path) == 0, "Could not create concurrent outside hard link")
+                linkedName = name
+                break
+            }
+        }
+        try expectError("outside hard link appeared after preflight") { try f.service.hideAll() }
+        try require(linkedName != nil, "Concurrent link fixture did not execute")
+        try require(!(try isHidden(outside)), "Concurrent outside hard link acquired the hidden flag")
+        for name in [f.first, f.folder, f.other] {
+            try require(!(try isHidden(f.url(name))), "Concurrent-link failure left a desktop target hidden")
+        }
+        try require(f.service.presentation.mode == .visible, "Concurrent-link rollback did not finish")
+        try require(!fm.fileExists(atPath: f.journal.path), "Concurrent-link rollback left an active journal")
+        try require(f.layout.positions == f.originalPoints, "Concurrent-link rollback changed target positions")
+    }
+}
+
+test("all-desktop rejects unsupported visible file types before changing anything") {
+    try Fixture("all-fifo").withCleanup { f in
+        let pipeName = "fixture-pipe"
+        try require(mkfifo(f.url(pipeName).path, 0o600) == 0, "Could not create fixture pipe")
+        f.layout.positions[pipeName] = DesktopPoint(x: 700, y: 500)
+        let before = try fileTreeSnapshot(f.desktop)
+        try expectError("visible FIFO") { try f.service.hideAll() }
+        try require(try fileTreeSnapshot(f.desktop) == before, "Unsupported type rejection changed files")
+        try require(!fm.fileExists(atPath: f.journal.path), "Unsupported file type created a journal")
+    }
+}
+
+test("empty visible desktop is a harmless all-desktop no-op") {
+    try Fixture("all-empty-desktop").withCleanup { f in
+        for name in [f.first, f.folder, f.other] { try setFixtureFlags(f.url(name), UInt32(UF_HIDDEN)) }
+        let before = try fileTreeSnapshot(f.desktop)
+        let manifest = try storedManifestBytes(f)
+        try f.service.hideAll()
+        try require(f.service.presentation.mode == .visible, "Empty desktop entered an active session")
+        try require(!fm.fileExists(atPath: f.journal.path), "Empty desktop created a recovery record")
+        try require(try fileTreeSnapshot(f.desktop) == before, "Empty desktop action exposed existing hidden files")
+        try require(try storedManifestBytes(f) == manifest, "Empty desktop action cleared manual targets")
+    }
+}
+
+test("legacy schema-one manual recovery still opens and restores") {
+    try Fixture("legacy-session").withCleanup { f in
+        try f.service.hide()
+        var legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: f.journal)) as! [String: Any]
+        legacy["schema"] = 1
+        legacy.removeValue(forKey: "scope")
+        legacy.removeValue(forKey: "desktopIdentity")
+        legacy.removeValue(forKey: "desktopPath")
+        try JSONSerialization.data(withJSONObject: legacy, options: [.sortedKeys]).write(to: f.journal)
+        let reopened = DesktopPrivacyService(manifest: f.manifest, dataRoot: f.data, layout: f.layout)
+        try reopened.initialize()
+        try require(reopened.presentation.mode == .hidden && reopened.presentation.count == 2,
+                    "Old-format manual recovery was rejected or broadened")
+        try reopened.restore()
+        try require(!(try isHidden(f.url(f.first))) && !(try isHidden(f.url(f.folder))),
+                    "Old-format manual recovery did not show its files")
+        try require(!(try isHidden(f.url(f.other))), "Old-format recovery changed an unselected file")
+    }
+}
+
+test("all-desktop journal rejects wrong scope desktop path and desktop identity") {
+    try Fixture("all-invalid-journal").withCleanup { f in
+        try f.service.hideAll()
+        let valid = try Data(contentsOf: f.journal)
+        let original = try JSONSerialization.jsonObject(with: valid) as! [String: Any]
+        let hiddenTree = try fileTreeSnapshot(f.desktop)
+        for mutation in 0..<4 {
+            var broken = original
+            switch mutation {
+            case 0: broken["scope"] = "unknownScope"
+            case 1: broken["desktopPath"] = f.root.appendingPathComponent("DifferentDesktop").path
+            case 2:
+                var identity = broken["desktopIdentity"] as! [String: Any]
+                identity["inode"] = UInt64.max
+                broken["desktopIdentity"] = identity
+            default: broken.removeValue(forKey: "scope")
+            }
+            let bytes = try JSONSerialization.data(withJSONObject: broken, options: [.sortedKeys])
+            try bytes.write(to: f.journal)
+            let reopened = DesktopPrivacyService(manifest: f.manifest, dataRoot: f.data, layout: f.layout)
+            try expectError("invalid all-desktop journal \(mutation)") { try reopened.initialize() }
+            try require(reopened.presentation.mode == .recovery,
+                        "Invalid pending journal lost the recovery/quit-protection state")
+            try expectError("restore from invalid all-desktop journal") { try reopened.restore() }
+            try expectError("hide over invalid all-desktop journal") { try reopened.hideAll() }
+            try require(try fileTreeSnapshot(f.desktop) == hiddenTree, "Invalid journal caused file changes")
+            try require(try Data(contentsOf: f.journal) == bytes, "Invalid journal was overwritten")
+        }
+        try valid.write(to: f.journal)
+        let recovered = DesktopPrivacyService(manifest: f.manifest, dataRoot: f.data, layout: f.layout)
+        try recovered.initialize()
+        try recovered.restore()
+    }
+}
+
+test("damage to a running all-desktop journal preserves recovery state and allows repaired retry") {
+    try Fixture("all-live-corruption").withCleanup { f in
+        try f.service.hideAll()
+        let valid = try Data(contentsOf: f.journal)
+        let damaged = Data("invalid recovery data".utf8)
+        try damaged.write(to: f.journal)
+        try expectError("live journal damage") { try f.service.restore() }
+        try require(f.service.presentation.mode == .recovery, "Live journal damage looked like a safe visible state")
+        for name in [f.first, f.folder, f.other] {
+            try require(try isHidden(f.url(name)), "Damaged journal caused an untracked file mutation")
+        }
+        try require(try Data(contentsOf: f.journal) == damaged, "Live journal damage was overwritten")
+        try valid.write(to: f.journal)
+        try f.service.restore()
+        try require(f.service.presentation.mode == .visible, "Repaired journal could not be retried in the same process")
+    }
+}
+
 do { try fm.removeItem(at: fixtureBase) }
 catch { failures.append("Temporary fixture cleanup failed: \(error)") }
 

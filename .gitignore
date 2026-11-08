@@ -4,6 +4,7 @@ build/
 dist/
 *.app/
 *.zip
+*.dmg
 *.dSYM/
 __pycache__/
 *.pyc
